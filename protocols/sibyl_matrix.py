@@ -56,7 +56,7 @@ class MatrixUser(User):
   #   self.real = (User) the "real" User behind this user (defaults to self)
   # @param user (object) a full username
   def parse(self,user):
-    if(isinstance(user,mxUser)):
+    if(isinstance(user,mxUser.User)):
       self.user = user
     elif(isinstance(user,basestring)):
       self.user = self.protocol.client.get_user(user)
@@ -94,7 +94,7 @@ class MatrixRoom(Room):
   #   self.pword = the password for this room (defaults to None)
   # @param name (object) a full roomid
   def parse(self,name):
-    if(isinstance(name,mxRoom)):
+    if(isinstance(name,mxRoom.Room)):
       self.room = room
     elif(isinstance(user,basestring)):
       self.room = mxRoom(self.protocol.client,name) # [TODO] Assumes a room ID for now
@@ -127,6 +127,12 @@ class MatrixProtocol(Protocol):
     self.connected = False
     self.rooms = {}
     self.bot.add_var("credentials",persist=True)
+
+    # Create a client in setup() because we might use self.client before
+    # connect() is called
+    print(self.opt('matrix.server'))
+    homeserver = self.opt('matrix.server')
+    self.client = MatrixClient(homeserver)
 
   # @raise (ConnectFailure) if can't connect to server
   # @raise (AuthFailure) if failed to authenticate to server
@@ -243,7 +249,7 @@ class MatrixProtocol(Protocol):
 
   # @return (User) our username
   def get_user(self):
-    return MatrixUser(self.client.get_user(self.client.user_id))
+    return MatrixUser(self,'matrix',self.opt('matrix.username'))
 
   # @param user (str) a user id to parse
   # @param typ (int) either Message.GROUP or Message.PRIVATE
