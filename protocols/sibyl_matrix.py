@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 # Sibyl: A modular Python chat bot framework
-# Copyright (c) 2015-2016 Joshua Haas <jahschwa.com>
+# Copyright (c) 2016 Jonathan Frederickson <jonathan@terracrypt.net>
 #
 # This file is part of Sibyl.
 #
@@ -249,14 +249,14 @@ class MatrixProtocol(Protocol):
 
   # @return (User) our username
   def get_user(self):
-    return MatrixUser(self,'matrix',self.opt('matrix.username'))
+    return MatrixUser(self,self.opt('matrix.username'),Message.GROUP)
 
   # @param user (str) a user id to parse
   # @param typ (int) either Message.GROUP or Message.PRIVATE
   # @param real (User) [self] the "real" user behind this user
   # @return (User) a new instance of this protocol's User subclass
   def new_user(self,user,typ,real=None):
-    return MatrixUser(self,'matrix',user,typ,real)
+    return MatrixUser(self,user,typ,real)
 
   # @param name (object) the identifier for this Room
   # @param nick (str) [None] the nick name to use in this Room
