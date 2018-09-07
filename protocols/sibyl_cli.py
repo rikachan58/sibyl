@@ -1,4 +1,3 @@
-#!/usr/bin/python
 # -*- coding: utf-8 -*-
 #
 # Sibyl: A modular Python chat bot framework
@@ -26,36 +25,11 @@ from threading import Thread,Event
 from Queue import Queue
 
 from sibyl.lib.protocol import User,Room,Message,Protocol
-from sibyl.lib.protocol import ProtocolError as SuperProtocolError
-from sibyl.lib.protocol import PingTimeout as SuperPingTimeout
-from sibyl.lib.protocol import ConnectFailure as SuperConnectFailure
-from sibyl.lib.protocol import AuthFailure as SuperAuthFailure
-from sibyl.lib.protocol import ServerShutdown as SuperServerShutdown
 
 from sibyl.lib.decorators import botconf
 
 USER = 'admin@cli'
 SIBYL = 'sibyl@cli'
-
-################################################################################
-# Custom exceptions
-################################################################################
-
-class ProtocolError(SuperProtocolError):
-  def __init__(self):
-    self.protocol = __name__.split('_')[-1]
-
-class PingTimeout(SuperPingTimeout,ProtocolError):
-  pass
-
-class ConnectFailure(SuperConnectFailure,ProtocolError):
-  pass
-
-class AuthFailure(SuperAuthFailure,ProtocolError):
-  pass
-
-class ServerShutdown(SuperServerShutdown,ProtocolError):
-  pass
 
 ################################################################################
 # Config options
@@ -148,7 +122,6 @@ class CLI(Protocol):
 
   def setup(self):
 
-    self.connected = False
     self.thread = None
 
   def connect(self):
@@ -164,10 +137,6 @@ class CLI(Protocol):
     self.thread = BufferThread(
         self.queue,self.event_data,self.event_close,self.event_proc)
     self.thread.start()
-    self.connected = True
-
-  def is_connected(self):
-    return self.connected
 
   def process(self):
 

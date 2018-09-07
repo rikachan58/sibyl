@@ -1,4 +1,3 @@
-#!/usr/bin/python
 # -*- coding: utf-8 -*-
 #
 # Sibyl: A modular Python chat bot framework
@@ -27,33 +26,8 @@ from threading import Thread
 from Queue import Queue
 
 from sibyl.lib.protocol import User,Room,Message,Protocol
-from sibyl.lib.protocol import ProtocolError as SuperProtocolError
-from sibyl.lib.protocol import PingTimeout as SuperPingTimeout
-from sibyl.lib.protocol import ConnectFailure as SuperConnectFailure
-from sibyl.lib.protocol import AuthFailure as SuperAuthFailure
-from sibyl.lib.protocol import ServerShutdown as SuperServerShutdown
 
 from sibyl.lib.decorators import botconf
-
-################################################################################
-# Custom exceptions
-################################################################################
-
-class ProtocolError(SuperProtocolError):
-  def __init__(self):
-    self.protocol = __name__.split('_')[-1]
-
-class PingTimeout(SuperPingTimeout,ProtocolError):
-  pass
-
-class ConnectFailure(SuperConnectFailure,ProtocolError):
-  pass
-
-class AuthFailure(SuperAuthFailure,ProtocolError):
-  pass
-
-class ServerShutdown(SuperServerShutdown,ProtocolError):
-  pass
 
 ################################################################################
 # Config options
@@ -157,10 +131,6 @@ class MailProtocol(Protocol):
     self.log.debug('Attempting SMTP connection')
     self._connect_smtp()
     self.log.info('SMTP successful')
-
-  # @return (bool) True if we are connected to the server
-  def is_connected(self):
-    return self.thread.imap is not None
 
   # receive/process messages and call bot._cb_message()
   # must ignore msgs from myself and from users not in any of our rooms
@@ -316,13 +286,31 @@ class MailProtocol(Protocol):
       self.smtp.starttls()
       self.smtp.ehlo()
     except:
-      raise ConnectFailure
+      raise self.ConnectFailure('SMTP')
 
     # if the protocol raises AuthFailure, SibylBot will never try to reconnect
     try:
       self.smtp.login(self.opt('email.username'),self.opt('email.password'))
     except:
-      raise AuthFailure
+      raise self.AuthFailure('SMTP')
+
+  # convenience wrapper for sending stuff
+  def _send(self,text,to):
+
+    msg = Message(self.get_user(),text,to=to)
+    self.bot.send(msg)
+
+  # wrapper for imap server in case config opts get edited
+  def _get_imap(self):
+
+    server = self.opt('email.username').split('@')[-1]
+    return (self.opt('email.imap') or ('imap.'+server))
+
+  # wrapper for smtp server in case config opts get edited
+  def _get_smtp(self):
+
+    server = self.opt('email.username').split('@')[-1]
+    return (self.opt('email.smtp') or ('smtp.'+server))
 
   # convenience wrapper for sending stuff
   def _send(self,text,to):
@@ -380,7 +368,7 @@ class IMAPThread(Thread):
           self.connect()
 
         # raising exceptions in a Thread is messy, so we'll queue it instead
-        except ProtocolError as e:
+        except self.ProtocolError as e:
           self.imap = None
           self.msgs.put(e)
 
@@ -399,13 +387,13 @@ class IMAPThread(Thread):
     try:
       self.imap = imaplib.IMAP4_SSL(self.proto._get_imap())
     except:
-      raise ConnectFailure
+      raise self.proto.ConnectFailure('IMAP')
 
     try:
       self.imap.login(self.proto.opt('email.username'),
         self.proto.opt('email.password'))
     except:
-      raise AuthFailure
+      raise self.proto.AuthFailure('IMAP')
 
     # we have to specify which Inbox to use, and then enter the IDLE state
     self.imap.select()

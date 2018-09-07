@@ -2,6 +2,8 @@
 
 ## Intro
 
+<img align="right" src="sibyl_logo_small.png" />
+
 This is my personal XMPP bot made mostly for controlling XBMC on my Raspberry
 Pi. I find the `videos`, `seek`, `info`, `bookmark`, and `resume` commands to
 be very handy. This is tested on RaspBMC, OSMC, Ubuntu, and Windows 7, but
@@ -13,7 +15,7 @@ other info check out [the wiki][wiki].
 
 ## Dependencies
 
-REQUIERD: You'll need the following installed in order to use sibyl:
+REQUIRED: You'll need the following installed in order to use sibyl:
 
  - [python][python] - currently only python2
  - [requests][req] - HTTP request and wrapper library - `pip install requests`

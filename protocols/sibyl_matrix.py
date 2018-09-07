@@ -1,4 +1,3 @@
-#!/usr/bin/python
 # -*- coding: utf-8 -*-
 #
 # Sibyl: A modular Python chat bot framework
@@ -24,40 +23,17 @@
 
 from Queue import Queue
 from urlparse import urlparse
+import traceback, datetime, pytz
 
 from sibyl.lib.protocol import User,Room,Message,Protocol
-from sibyl.lib.protocol import ProtocolError as SuperProtocolError
-from sibyl.lib.protocol import PingTimeout as SuperPingTimeout
-from sibyl.lib.protocol import ConnectFailure as SuperConnectFailure
-from sibyl.lib.protocol import AuthFailure as SuperAuthFailure
-from sibyl.lib.protocol import ServerShutdown as SuperServerShutdown
 
 from sibyl.lib.decorators import botconf
 
 from matrix_client.client import MatrixClient
 from matrix_client.api import MatrixRequestError, MatrixHttpApi
+from matrix_client.errors import MatrixHttpLibError
 import matrix_client.user as mxUser
 import matrix_client.room as mxRoom
-
-################################################################################
-# Custom exceptions
-################################################################################
-
-class ProtocolError(SuperProtocolError):
-  def __init__(self):
-    self.protocol = __name__.split('_')[-1]
-
-class PingTimeout(SuperPingTimeout,ProtocolError):
-  pass
-
-class ConnectFailure(SuperConnectFailure,ProtocolError):
-  pass
-
-class AuthFailure(SuperAuthFailure,ProtocolError):
-  pass
-
-class ServerShutdown(SuperServerShutdown,ProtocolError):
-  pass
 
 ################################################################################
 # Config options
@@ -69,7 +45,12 @@ def conf(bot):
     {"name": "username", "req": True},
     {"name": "password", "req": True},
     {"name": "server", "req": True},
-    {"name": "debug", "req": False, "default": False}
+    {"name": "debug", "req": False, "default": False},
+    # Valid values for join_on_invite are reject, accept, domain
+    # reject: Don't accept any invites received
+    # accept: Join any room when receiving an invite
+    # domain: Only join rooms on invite if the inviter is on the same HS
+    {"name": "join_on_invite", "req": False, "default": "reject"}
   ]
 
 ################################################################################
@@ -148,11 +129,17 @@ class MatrixRoom(Room):
 
 class MatrixProtocol(Protocol):
 
+  # List of occupants in each room
+  # Used to avoid having to re-request the list of members each time
+  room_occupants = {}
+  # Keep track of when we joined rooms this session
+  # Used to filter out historical messages after accepting room invites
+  join_timestamps = {}
+
   # called on bot init; the following are already created by __init__:
   #   self.bot = SibylBot instance
   #   self.log = the logger you should use
   def setup(self):
-    self.connected = False
     self.rooms = {}
     self.bot.add_var("credentials",persist=True)
 
@@ -190,21 +177,28 @@ class MatrixProtocol(Protocol):
 
       # Connect to Sibyl's message callback
       self.client.add_listener(self.messageHandler)
+      self.client.add_invite_listener(self.inviteHandler)
 
-      self.client.start_listener_thread()
-      self.connected = True
-       
+      self.log.debug("Starting Matrix listener thread")
+      self.client.start_listener_thread(exception_handler=self._matrix_exception_handler)
+
     except MatrixRequestError as e:
-      if(e.code == 403):
+      if(e.code in [401, 403]):
         self.log.debug("Credentials incorrect! Maybe your access token is outdated?")
-        raise AuthFailure
+        raise self.AuthFailure
       else:
+        if(self.opt('matrix.debug')):
+          tb = traceback.format_exc()
+          self.log.debug(tb)
         self.log.debug("Failed to connect to homeserver!")
-        raise ConnectFailure
+        raise self.ConnectFailure
+    except MatrixHttpLibError as e:
+      self.log.error("Failed to connect to homeserver!")
+      self.log.debug("Received error:" + str(e))
+      raise self.ConnectFailure
 
-  # @return (bool) True if we are connected to the server
-  def is_connected(self):
-    return self.connected
+  def _matrix_exception_handler(self, e):
+    self.msg_queue.put(e)
 
   # receive/process messages and call bot._cb_message()
   # must ignore msgs from myself and from users not in any of our rooms
@@ -214,7 +208,14 @@ class MatrixProtocol(Protocol):
   # @raise (ServerShutdown) if server shutdown
   def process(self):
     while(not self.msg_queue.empty()):
-      self.bot._cb_message(self.msg_queue.get())
+      next = self.msg_queue.get()
+      if(isinstance(next, Message)):
+        self.log.debug("Placing message into queue: " + next.get_text())
+        self.bot._cb_message(next)
+      elif(isinstance(next, MatrixHttpLibError)):
+        self.log.debug("Received error from Matrix SDK, stopping listener thread: " + str(next))
+        self.client.stop_listener_thread()
+        raise self.ConnectFailure("Connection error returned by requests library: " + str(next))
 
 
   def messageHandler(self, msg):
@@ -226,48 +227,82 @@ class MatrixProtocol(Protocol):
       u = self.new_user(msg['sender'], Message.GROUP)
       r = self.new_room(msg['room_id'])
 
-      msgtype = msg['content']['msgtype']
-      
-      if(msgtype == 'm.text'):
-        m = Message(u, msg['content']['body'], room=r, typ=Message.GROUP)
-        self.log.debug('Handling m.text: ' + msg['content']['body'])
-        self.msg_queue.put(m)
+      if(r in self.join_timestamps
+         and datetime.datetime.fromtimestamp(msg['origin_server_ts']/1000, pytz.utc) < self.join_timestamps[r]):
+        self.log.info('Message received in {} from before room join, ignoring'.format(msg['room_id']))
+        return None
 
-      elif(msgtype == 'm.emote'):
-        m = Message(u, msg['content']['body'], room=r, typ=Message.GROUP,
-            emote=True)
-        self.log.debug('Handling m.emote: ' + msg['content']['body'])
-        self.msg_queue.put(m)
-        
-      elif(msgtype == 'm.image' or msgtype == 'm.audio' or msgtype == 'm.file' or msgtype == 'm.video'):
-        media_url = urlparse(msg['content']['url'])
-        http_url = self.client.api.base_url + "/_matrix/media/r0/download/{0}{1}".format(media_url.netloc, media_url.path)
-        if(msgtype == 'm.image'):
-          body = "{0} uploaded {1}: {2}".format(msg['sender'], msg['content'].get('body', 'an image'), http_url)
-        elif(msgtype == 'm.audio'):
-          body = "{0} uploaded {1}: {2}".format(msg['sender'], msg['content'].get('body', 'an audio file'), http_url)
-        elif(msgtype == 'm.video'):
-          body = "{0} uploaded {1}: {2}".format(msg['sender'], msg['content'].get('body', 'a video file'), http_url)
-        elif(msgtype == 'm.file'):
-          body = "{0} uploaded {1}: {2}".format(msg['sender'], msg['content'].get('body', 'a file'), http_url)
-        m = Message(u, body, room=r, typ=Message.GROUP)
-        self.log.debug("Handling " + msgtype + ": " + body)
-        self.msg_queue.put(m)
+      if('msgtype' in msg['content']):
+        msgtype = msg['content']['msgtype']
 
-      elif(msgtype == 'm.location'):
-        body = "{0} sent a location: {1}".format(msg['sender'], msg['content']['geo_uri'])
-        m = Message(u, body, room=r, typ=Message.GROUP)
-        self.log.debug('Handling m.location: ' + body)
-        self.msg_queue.put(m)
+        if(msgtype == 'm.text'):
+          m = Message(u, msg['content']['body'], room=r, typ=Message.GROUP)
+          self.log.debug('Handling m.text: ' + msg['content']['body'])
+          self.msg_queue.put(m)
+
+        elif(msgtype == 'm.emote'):
+          m = Message(u, msg['content']['body'], room=r, typ=Message.GROUP,
+          emote=True)
+          self.log.debug('Handling m.emote: ' + msg['content']['body'])
+          self.msg_queue.put(m)
+
+        elif(msgtype == 'm.image' or msgtype == 'm.audio' or msgtype == 'm.file' or msgtype == 'm.video'):
+          media_url = urlparse(msg['content']['url'])
+          http_url = self.client.api.base_url + "/_matrix/media/r0/download/{0}{1}".format(media_url.netloc, media_url.path)
+          if(msgtype == 'm.image'):
+            body = "{0} uploaded {1}: {2}".format(msg['sender'], msg['content'].get('body', 'an image'), http_url)
+          elif(msgtype == 'm.audio'):
+            body = "{0} uploaded {1}: {2}".format(msg['sender'], msg['content'].get('body', 'an audio file'), http_url)
+          elif(msgtype == 'm.video'):
+            body = "{0} uploaded {1}: {2}".format(msg['sender'], msg['content'].get('body', 'a video file'), http_url)
+          elif(msgtype == 'm.file'):
+            body = "{0} uploaded {1}: {2}".format(msg['sender'], msg['content'].get('body', 'a file'), http_url)
+          m = Message(u, body, room=r, typ=Message.GROUP)
+          self.log.debug("Handling " + msgtype + ": " + body)
+          self.msg_queue.put(m)
+
+        elif(msgtype == 'm.location'):
+          body = "{0} sent a location: {1}".format(msg['sender'], msg['content']['geo_uri'])
+          m = Message(u, body, room=r, typ=Message.GROUP)
+          self.log.debug('Handling m.location: ' + body)
+          self.msg_queue.put(m)
 
 
-      else:
-        self.log.debug('Not handling message, unknown msgtype')
-          
-        
-        
+        else:
+          self.log.debug('Not handling message, unknown msgtype')
+
+      elif('membership' in msg):
+        if(msg['membership'] == 'join'):
+          self.room_occupants[r].add(self.new_user(msg['state_key'], Message.GROUP))
+        elif(msg['membership'] == 'leave'):
+          self.room_occupants[r].remove(self.new_user(msg['state_key'], Message.GROUP))
+
     except KeyError as e:
       self.log.debug("Incoming message did not have all required fields: " + e.message)
+
+
+  def inviteHandler(self, room_id, state):
+    join_on_invite = self.opt('matrix.join_on_invite')
+
+    invite_events = [x for x in state['events'] if x['type'] == 'm.room.member'
+                     and x['state_key'] == str(self.get_user())
+                     and x['content']['membership'] == 'invite']
+    if(len(invite_events) != 1):
+      raise KeyError("Something's up, found more than one invite state event for " + room_id)
+
+    inviter = invite_events[0]['sender']
+    inviter_domain = inviter.split(':')[1]
+    my_domain = str(self.get_user()).split(':')[1]
+
+    if(join_on_invite == 'accept' or (join_on_invite == 'domain' and inviter_domain == my_domain)):
+      self.log.debug('Joining {} on invite from {}'.format(room_id, inviter))
+      self.join_room(MatrixRoom(self, room_id))
+
+    elif(join_on_invite == 'domain' and inviter_domain != my_domain):
+      self.log.debug("Received invite for {} but inviter {} is on a different homeserver").format(room_id, inviter)
+
+    else:
+      self.log.debug("Received invite for {} from {} but join_on_invite is disabled".format(room_id, inviter))
 
 
   # called when the bot is exiting for whatever reason
@@ -318,6 +353,7 @@ class MatrixProtocol(Protocol):
     try:
       res = self.client.join_room(room.room.room_id)
       self.bot._cb_join_room_success(room)
+      self.join_timestamps[room] = datetime.datetime.now(pytz.utc)
     except MatrixRequestError as e:
       self.bot._cb_join_room_failure(room, e.message)
 
@@ -338,8 +374,13 @@ class MatrixProtocol(Protocol):
   # @param room (Room) the room to query
   # @return (list of User) the Users in the specified room
   def get_occupants(self,room):
-    memberdict = room.room.get_joined_members()
-    return [ self.new_user(x) for x in memberdict ]
+    if(room in self.room_occupants):
+      return list(self.room_occupants[room])
+    else:
+      memberdict = room.room.get_joined_members()
+      users = [ self.new_user(x) for x in memberdict ]
+      self.room_occupants[room] = set(users)
+      return users
 
   # @param room (Room) the room to query
   # @return (str) the nick name we are using in the specified room
